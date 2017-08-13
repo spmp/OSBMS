@@ -3,13 +3,12 @@
   Created by David Burkitt, March 8, 2017.
   Released into the public domain.
 **********************************************************/
-
+#include <vector>
 #include "Arduino.h"
 #include "CellComms.h"
 
-
 #define  LDPC_BUF_SIZE 		50
-//#define _MAX_RX_BUFF 	102				// override the default RX buffer size - (NUM_CELLS + 1) x 6
+//#define _MAX_RX_BUFF 	102				// override the default RX buffer size - (_numCells + 1) x 6
 
 
 // used to determine which bits have been corrupted
@@ -20,46 +19,78 @@ const unsigned int    u16a_coset_leader_table[16]     = { 0x000, 0x800, 0x400, 0
 													  0x200, 0x020, 0x002, 0x208,
 													  0x100, 0x040, 0x004, 0x084,
 													  0x010, 0x080, 0x001, 0x801 };
-													  
+
 // used to generator the 12-bit code-words from the 8-bit data-bytes
 const byte		u8a_generator_matrix[4]				= { 0xD5, 0xB3, 0x0F, 0xE8 };
 
 
 byte _tx_packet[] = {0x9f, 0xff, 0xff, 0xff, 0xff, 0xff};
 
-struct _cellData
-{
-	unsigned int millivolts;
-	unsigned int temperature;
-	byte balancing;
-	byte overVoltage;
-	byte underVoltage;
-	byte overTemperature;
-} _cellDataArray[NUM_CELLS];
-
 byte cellsRead;
 byte minVIndex;
 byte maxVIndex;
 byte minTIndex;
 byte maxTIndex;
-	
 
-// Constructor
-CellComms::CellComms(void)
-{
-  Serial2.begin(CELL_BAUD);
-  
-  for (int i = 0; i < NUM_CELLS; ++i)
-  {
-	_cellDataArray[i].millivolts		= 0;
-	_cellDataArray[i].temperature		= 0;
-	_cellDataArray[i].balancing			= 0;
-	_cellDataArray[i].overVoltage		= 0;
-	_cellDataArray[i].underVoltage		= 0;
-	_cellDataArray[i].overTemperature	= 0;
-  }
-} // end of constructor -----------------------------------
+CellData::CellData(void) {};
 
+
+CellComms::CellComms (int numCells, Stream & port) : _Port (port), _CellDataArray(new CellData[numCells]) {
+		_numCells = numCells;
+	  for (int i = 0; i < _numCells; ++i)
+	  {
+			_CellDataArray[i].millivolts		= 0;
+			_CellDataArray[i].temperature		= 0;
+			_CellDataArray[i].balancing			= 0;
+			_CellDataArray[i].overVoltage		= 0;
+			_CellDataArray[i].underVoltage		= 0;
+			_CellDataArray[i].overTemperature	= 0;
+	  }
+}
+
+
+// // Constructor
+// CellComms::CellComms(int numCells) : _CellDataArray(new CellData[numCells])
+// {
+// 	_numCells = numCells;
+//   for (int i = 0; i < _numCells; ++i)
+//   {
+// 	_CellDataArray[i].millivolts		= 0;
+// 	_CellDataArray[i].temperature		= 0;
+// 	_CellDataArray[i].balancing			= 0;
+// 	_CellDataArray[i].overVoltage		= 0;
+// 	_CellDataArray[i].underVoltage		= 0;
+// 	_CellDataArray[i].overTemperature	= 0;
+//   }
+// } // end of constructor -----------------------------------
+//
+// void CellComms::begin(Stream & port){
+// 	_Stream = port;
+// }
+//
+byte CellComms::getCellsData(int millivolts) {
+	// Send comms initialisation to the cells, being the millivolts at which they?
+	sendMillivolts(millivolts);
+	// Get the current time
+	unsigned long millisStart = millis();
+	unsigned long millisRead = millisStart + (_numCells * CELL_INTERVAL);
+	// TODO: MAKE THIS ASYNC, i.e. more efficient
+	while (millis() <= millisRead) {
+		delay(CELL_INTERVAL);
+	}
+	int cellsRead         = readCells();
+
+	//  if (cellsRead == NUM_CELLS) {
+  if (cellsRead > 0) {
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+// byte CellComms::getCellsData(void) {
+// 	getCellsData(0);
+// }
 
 /***********************************************************
 	@brief	sends the initiator message containing the mean
@@ -69,7 +100,7 @@ void CellComms::sendMillivolts(int millivolts)
 {
 	// mask off the top 3 bits.
 	millivolts					&= 0x1FFF;
-	
+
 	// form into a 4byte buffer and encode
 	_tx_packet[0]				= (millivolts >> 8);
 	_tx_packet[0]				|= 0xE0;		// set the marker bits for a master message
@@ -77,12 +108,13 @@ void CellComms::sendMillivolts(int millivolts)
 	_tx_packet[2]				= (millivolts >> 8);
 	_tx_packet[2]				|= 0xE0;		// set the marker bits for a master message
 	_tx_packet[3]				= (millivolts);
-	
-	fecEncode(_tx_packet, 4);
-	
-  int bytesSent					= Serial2.write(_tx_packet, 6);
 
-  Serial2.flush();
+	fecEncode(_tx_packet);
+
+	// _Port.println("Whatever biatch!");
+  int bytesSent				= _Port.write(_tx_packet, 6);
+	//
+  _Port.flush();
 } // end of sendMillivolts ---------------------------------
 
 
@@ -94,37 +126,39 @@ void CellComms::sendMillivolts(int millivolts)
 int CellComms::readCells(void)
 {
   const int expected_bytes    					= 6;
-  int bytes_available         					= Serial2.available();
+  int bytes_available         					= _Port.available();
   int cellNum                 					= 0;
   int tempMillivolts;
-  
+
   while (bytes_available >= expected_bytes ) {
     int i                     					= 0;
     unsigned char payload[expected_bytes];
     while (i < expected_bytes) {
-      byte currByte           					= Serial2.read();
+      byte currByte           					= _Port.read();
       --bytes_available;
       payload[i]              					= currByte;
       ++i;
     }
-    
+
     // decode the packet
     unsigned char decoded[4];
     fecDecode(&payload[0], &decoded[0], sizeof(payload));
-    
+
 	if ((decoded[0] & 0x60) == 0) {
     // Interpret decoded values.
     // Bytes 0 and 1 make up the voltage.
     // Bytes 2 and 3 make up the temperature.
 	tempMillivolts									= ((decoded[0] & 0x1F) << 8) + decoded[1];
-	if ( (tempMillivolts > 1900)				// The regulator colapses at 2v
-			&& (tempMillivolts < 5100) ) {		// the adc will max out at 5v
-		_cellDataArray[cellNum].millivolts			= ((decoded[0] & 0x1F) << 8) + decoded[1];
-		_cellDataArray[cellNum].temperature			= ((decoded[2] & 0x0F) << 8) + decoded[3];
-		_cellDataArray[cellNum].balancing			= ((decoded[0] & 0x80) >> 7);
-		_cellDataArray[cellNum].overTemperature		= ((decoded[2] & 0x80) >> 7);
-		_cellDataArray[cellNum].overVoltage			= ((decoded[2] & 0x40) >> 6);
-		_cellDataArray[cellNum].underVoltage		= ((decoded[2] & 0x20) >> 5);
+	if (
+			(tempMillivolts > 1900)  &&	// The regulator colapses at 2v
+			(tempMillivolts < 5100)
+		) {		// the adc will max out at 5v
+			_CellDataArray[cellNum].millivolts			= ((decoded[0] & 0x1F) << 8) + decoded[1];
+			_CellDataArray[cellNum].temperature			= ((decoded[2] & 0x0F) << 8) + decoded[3];
+			_CellDataArray[cellNum].balancing			= ((decoded[0] & 0x80) >> 7);
+			_CellDataArray[cellNum].overTemperature		= ((decoded[2] & 0x80) >> 7);
+			_CellDataArray[cellNum].overVoltage			= ((decoded[2] & 0x40) >> 6);
+			_CellDataArray[cellNum].underVoltage		= ((decoded[2] & 0x20) >> 5);
 		} // end of if mV makes sense
 	} // end of if valid cell data
 
@@ -136,17 +170,17 @@ int CellComms::readCells(void)
 		++cellNum;
 	}
   } // end of while packet available
-  
+
   cellsRead											= cellNum;
-  
+
   // Read remaining bytes...
-  bytes_available             						= Serial2.available(); 
+  bytes_available             						= _Port.available();
   if (bytes_available > 0) {
     for (int i = 0; i < bytes_available; ++i) {
-      byte discard            						= Serial2.read();
+      byte discard            						= _Port.read();
     } // end of for each leftover byte
   } // end of if leftover bytes
-  
+
   return cellNum;
 } // end of readCells --------------------------------------
 
@@ -157,16 +191,16 @@ int CellComms::readCells(void)
 int CellComms::getCellsAveV(void)
 {
 	long aveVal			= 0;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		aveVal			+= _cellDataArray[i].millivolts;
+		aveVal			+= _CellDataArray[i].millivolts;
 	}
-	
+
 	return (int) (aveVal / cellsRead);
 } // end of getCellsAveV -----------------------------------
 
@@ -176,21 +210,21 @@ int CellComms::getCellsAveV(void)
 ***********************************************************/
 int CellComms::getCellsMinV(void)
 {
-	int minVal			= _cellDataArray[0].millivolts;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+	int minVal			= _CellDataArray[0].millivolts;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (minVal > _cellDataArray[i].millivolts)
+		if (minVal > _CellDataArray[i].millivolts)
 		{
-			minVal		= _cellDataArray[i].millivolts;
+			minVal		= _CellDataArray[i].millivolts;
 			minVIndex	= i;
 		}
 	}
-	
+
 	return minVal;
 } // end of getCellsMinV -----------------------------------
 
@@ -200,21 +234,21 @@ int CellComms::getCellsMinV(void)
 ***********************************************************/
 int CellComms::getCellsMaxV(void)
 {
-	int maxVal			= _cellDataArray[0].millivolts;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+	int maxVal			= _CellDataArray[0].millivolts;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (maxVal < _cellDataArray[i].millivolts)
+		if (maxVal < _CellDataArray[i].millivolts)
 		{
-			maxVal		= _cellDataArray[i].millivolts;
+			maxVal		= _CellDataArray[i].millivolts;
 			maxVIndex	= i;
 		}
 	}
-	
+
 	return maxVal;
 } // end of getCellsMaxV -----------------------------------
 
@@ -225,16 +259,16 @@ int CellComms::getCellsMaxV(void)
 int CellComms::getCellsAveT(void)
 {
 	int aveVal			= 0;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		aveVal			+= _cellDataArray[i].temperature;
+		aveVal			+= _CellDataArray[i].temperature;
 	}
-	
+
 	return (aveVal / cellsRead);
 } // end of getCellsAveT -----------------------------------
 
@@ -244,21 +278,21 @@ int CellComms::getCellsAveT(void)
 ***********************************************************/
 int CellComms::getCellsMinT(void)
 {
-	int minVal			= _cellDataArray[0].temperature;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+	int minVal			= _CellDataArray[0].temperature;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (minVal > _cellDataArray[i].temperature)
+		if (minVal > _CellDataArray[i].temperature)
 		{
-			minVal		= _cellDataArray[i].temperature;
+			minVal		= _CellDataArray[i].temperature;
 			minTIndex	= i;
 		}
 	}
-	
+
 	return minVal;
 } // end of getCellsMinT -----------------------------------
 
@@ -268,21 +302,21 @@ int CellComms::getCellsMinT(void)
 ***********************************************************/
 int CellComms::getCellsMaxT(void)
 {
-	int maxVal			= _cellDataArray[0].temperature;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+	int maxVal			= _CellDataArray[0].temperature;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (maxVal < _cellDataArray[i].temperature)
+		if (maxVal < _CellDataArray[i].temperature)
 		{
-			maxVal		= _cellDataArray[i].temperature;
+			maxVal		= _CellDataArray[i].temperature;
 			maxTIndex	= i;
 		}
 	}
-	
+
 	return maxVal;
 } // end of getCellsMaxT -----------------------------------
 
@@ -293,19 +327,19 @@ int CellComms::getCellsMaxT(void)
 int CellComms::getCellsBalancing(void)
 {
 	int count		= 0;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (0 != _cellDataArray[i].balancing)
+		if (0 != _CellDataArray[i].balancing)
 		{
 			++count;
 		} // end of if this cell is balancing
 	} // end of for each cell
-	
+
 	return count;
 } // end of getCellsBalancing ------------------------------
 
@@ -316,19 +350,19 @@ int CellComms::getCellsBalancing(void)
 int CellComms::getCellsOverVolt(void)
 {
 	int count		= 0;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (0 != _cellDataArray[i].overVoltage)
+		if (0 != _CellDataArray[i].overVoltage)
 		{
 			++count;
 		} // end of if this cell is overVoltage
 	} // end of for each cell
-	
+
 	return count;
 } // end of getCellsOverVolt ------------------------------
 
@@ -339,19 +373,19 @@ int CellComms::getCellsOverVolt(void)
 int CellComms::getCellsUnderVolt(void)
 {
 	int count		= 0;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (0 != _cellDataArray[i].underVoltage)
+		if (0 != _CellDataArray[i].underVoltage)
 		{
 			++count;
 		} // end of if this cell is underVoltage
 	} // end of for each cell
-	
+
 	return count;
 } // end of getCellsUnderVolt ------------------------------
 
@@ -362,19 +396,19 @@ int CellComms::getCellsUnderVolt(void)
 int CellComms::getCellsOverTemp(void)
 {
 	int count		= 0;
-	
-	if (cellsRead > NUM_CELLS) {
-		cellsRead		= NUM_CELLS;
+
+	if (cellsRead > _numCells) {
+		cellsRead		= _numCells;
 	}
-	
+
 	for (int i = 0; i < cellsRead; ++i)
 	{
-		if (0 != _cellDataArray[i].overTemperature)
+		if (0 != _CellDataArray[i].overTemperature)
 		{
 			++count;
 		} // end of if this cell is overTemp
 	} // end of for each cell
-	
+
 	return count;
 } // end of getCellsOverTemp -------------------------------
 
@@ -428,7 +462,7 @@ int CellComms::getMaxTCell(void)
  *
  * Returns the length of the encoded message
  **********************************************************/
-byte		CellComms::fecEncode(byte p_msg[], byte u8_msg_len)
+byte		CellComms::fecEncode(byte p_msg[])
 {
 	unsigned int	u16a_code_word[LDPC_BUF_SIZE];
 	byte			u8_i, u8_encode, u8_g_matrix, u8_j, u8_g, u8_h;
@@ -437,23 +471,27 @@ byte		CellComms::fecEncode(byte p_msg[], byte u8_msg_len)
 #endif
 	byte			u8a_tmp[LDPC_BUF_SIZE];
 
+	// Pad input array to multiples of 6 and converet to Vector
+	// n, the new desired length
+	// p the current length
+	// size of input array
+	byte u8_msg_len = sizeof(p_msg) / sizeof(byte);
 	// ensure that packet size is modulus 6
-	u8_i							= 3 - ((u8_msg_len + 3) & 0x03);
-	while (u8_i) {
-		// pad-out with 0xFF
-		p_msg[u8_msg_len]			= 0xFF;
-		u8_msg_len++;
-		u8_i--;
-	} // end of while padding bytes needed.
+	u8_i											= 3 - ((u8_msg_len + 3) & 0x03);
+	uint8_t n = u8_msg_len + u8_i;
+	// val *n_msg = new byte[n];
+	std::vector<byte> n_msg;
+	n_msg.insert(n_msg.end(), &p_msg[0], &p_msg[u8_msg_len]);
+	n_msg.resize(n, 0xFF);
 
 	for (u8_i = 0; u8_i < u8_msg_len; u8_i++) {
 		// initialise code-word with orginial byte
-		u16a_code_word[u8_i]		= p_msg[u8_i];
+		u16a_code_word[u8_i]		= n_msg[u8_i];
 
 		// encode using the generator matrix
 		for (u8_g_matrix = 0; u8_g_matrix < 4; u8_g_matrix++) {
 			// bit-mask byte with generator matrix
-			u8_encode				= u8a_generator_matrix[u8_g_matrix] & p_msg[u8_i];
+			u8_encode				= u8a_generator_matrix[u8_g_matrix] & n_msg[u8_i];
 
 			// calculate odd-parity
 			u8_encode	^= u8_encode >> 8;
@@ -492,11 +530,11 @@ byte		CellComms::fecEncode(byte p_msg[], byte u8_msg_len)
 		for (u8_j = 0; u8_j < 6; u8_j++) {
 #ifdef INTERLACING
 			// reset bytes
-			p_msg[u8_i + u8_j]		= 0;
+			n_msg[u8_i + u8_j]		= 0;
 
 			for (u8_k = 0; u8_k < 8; u8_k++) {
 				// interleave bits
-				p_msg[u8_i + u8_j]	+= ( (u8a_tmp[u8_i + u8_g] >> u8_h) & 0x01 ) << u8_k;
+				n_msg[u8_i + u8_j]	+= ( (u8a_tmp[u8_i + u8_g] >> u8_h) & 0x01 ) << u8_k;
 
 				// increment indexex
 				if (++u8_g > 5) {
@@ -505,7 +543,7 @@ byte		CellComms::fecEncode(byte p_msg[], byte u8_msg_len)
 				}
 			} // end of for each bit in a byte
 #else
-			p_msg[u8_i + u8_j]		= u8a_tmp[u8_i + u8_j];
+			n_msg[u8_i + u8_j]		= u8a_tmp[u8_i + u8_j];
 #endif
 		} // end of for each byte in a block
 	} // end of for each block of 6 bytes
@@ -630,4 +668,3 @@ void    CellComms::fecByteDecode(unsigned int *u16_code_word)
   // error correction to the codeword, XOR the codeword with the coset leader
   (*u16_code_word)  ^= u16a_coset_leader_table[u8_syndrome];
 } // end of fv_fec_byte_decode function --------------------
-

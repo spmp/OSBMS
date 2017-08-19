@@ -1,95 +1,82 @@
 /***********************************************************
   CellComms.h - Library for reading the OSBMS Cell Monitors.
   Created by David Burkitt, March 8, 2017.
+  Re-imagined by Jasper Aoranig, August, 2017.
   Released into the public domain.
 
-  The DARC interface board fits onto an Arduino Mega2560
-  and uses Serial2 to communicate with the Cell Monitors.
-
-  NOTE: You will need to edit
-  C:\Users\<username>\AppData\Local\Arduino15\packages\arduino\hardware\avr\<version>\cores\arduino\HardwareSerial.h
-  if you need to read more than 9 cells.
-
-  User needs to select the appropriate CELL_BAUD value to match
-  their Cell Monitor boards and set NUM_CELLS to match the
-  number of cell monitors in their battery stack.
-
-  sendMillivolts transmits the initiator packet
-  readCells should be called after sendMillivolts allowing time
-	for the message to propogate through the battery.
+  Instantiate the class with the number of cells and a
+  valid Serial/Stream device.
 ***********************************************************/
 
 #ifndef CellComms_h
 #define CellComms_h
 
+#include <iostream>
+#include <vector>
+#include <algorithm> //transform
+#include <numeric>   //accumulate
 #include "Arduino.h"
 #include "HardwareSerial.h"
 #include "Stream.h"
+#include "FEC.h"
 
-//#define CELL_BAUD			9600
-#define CELLCOMMS_BAUD			  19200	// Cell Monitors from v2.0 onwards are capable of 19200 baud
-//#define INTERLACING		1		// comment this to disable bitwise interlacing
-#define CELL_INTERVAL  25
+// Cell Monitors from v2.0 onwards are capable of 19200 baud
+#define CELLCOMMS_BAUD			   19200
+
+#define CTMUNENCODEDPACKETSIZE 4
+#define CTMENCODEDPACKETSIZE   6
 
 class CellData {
   public:
-  CellData(void);
-	unsigned int millivolts;
-	unsigned int temperature;
-	byte balancing;
-	byte overVoltage;
-	byte underVoltage;
-	byte overTemperature;
+  CellData(void) {};
+	uint16_t millivolts     = 0;
+	uint16_t temperature    = 0;
+	uint8_t balancing       = 0;
+	uint8_t overTemperature = 0;
+	uint8_t overVoltage     = 0;
+	uint8_t underVoltage    = 0;
 };
-
-// class CellComms
-//   {
-//   private:
-//     Stream & port_;
-//     int _numCells;
-//     CellData * _CellDataArray;
-//   public:
-//     CellComms (int numCells, Stream & port);
-//     void begin ();
-//     void doShit (void);
-//   };
-
-
-
-
 
 class CellComms
 {
   public:
+  // Constructor and Initialisation
 	CellComms(int numCells, Stream & port);
-  // void begin(Stream & port);
-  void doShit(void);
-  byte getCellsData(void);
-  byte getCellsData(int millivolts);
-	void sendMillivolts(int millivolts);
-	int readCells(void);
-	int getCellsAveV(void);
-	int getCellsMinV(void);
-	int getCellsMaxV(void);
-	int getCellsAveT(void);
-	int getCellsMinT(void);
-	int getCellsMaxT(void);
-	int getCellsBalancing(void);
-	int getCellsOverVolt(void);
-	int getCellsUnderVolt(void);
-	int getCellsOverTemp(void);
-	int getMinVCell(void);
-	int getMaxVCell(void);
-	int getMinTCell(void);
-	int getMaxTCell(void);
-  Stream & _Port;
-  int _numCells;
+  void     begin(void);
+  // Cell interaction
+	void     sendMillivolts(int16_t millivolts);
+	void     sendMillivolts(void);
+	uint8_t  readCells(void);
+  // Cell stats
+  uint16_t millivoltsMean(void);
+  uint16_t millivoltsMax(void);
+  uint16_t millivoltsMin(void);
+  uint16_t temperatureMean(void);
+  uint16_t temperatureMax(void);
+  uint16_t temperatureMin(void);
+  uint8_t  balancingNum(void);
+  uint8_t  overVoltageNum(void);
+  uint8_t  underVoltageNum(void);
+  uint8_t  overTemperatureNum(void);
+  // Cell slices
+  std::vector<uint16_t> millivoltsVect(void);
+  std::vector<uint16_t> temperatureVect(void);
+  std::vector<uint8_t>  balancingVect(void);
+  std::vector<uint8_t>  overVoltageVect(void);
+  std::vector<uint8_t>  underVoltageVect(void);
+  std::vector<uint8_t>  overTemperatureVect(void);
+  // Supporting class variables
+  Stream & _Port;                       // Serial device
+  int cellNum;                          // Number of cells
+  std::vector<CellData> cellDataVect;   // Vector of CellData
   private:
-	byte		fecEncode(byte p_msg[]);
-	byte 		fecDecode(volatile byte en_msg[], byte de_msg[], byte u8_msg_len);
-	void 		fecByteDecode(unsigned int *u16_code_word);
-	byte 		_tx_packet[];
-  CellData * _CellDataArray;
-}; // ------------------------------------------------------
+  void                  generateMasterMessage(int16_t millivolts);
+  void                  getSerialVector();
+  CellData              extractCellData(uint8_t decodedArr[]);
+  uint8_t               extractPayloadsToCellData(void );
+  // Variables
+  uint8_t               txData[CTMENCODEDPACKETSIZE];
+  std::vector<uint8_t>  recievedSerialBytesVect;
+};
 
 #endif
